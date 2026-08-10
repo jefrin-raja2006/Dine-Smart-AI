@@ -48,7 +48,7 @@ DineSmart AI is a full-stack web application that helps users discover restauran
 - JWT Authentication
 
 ### Database
-- MySQL
+- Postgre SQL
 
 ### AI (Future Enhancement)
 - Recommendation System
