@@ -1,0 +1,65 @@
+import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import GetStarted from "./pages/GetStarted";
+import Home from "./pages/Home";
+import Login from "./pages/Login";
+import Register from "./pages/Register";
+import RestaurantDetails from "./pages/RestaurantDetails";
+import Profile from "./pages/Profile";
+import Restaurants from "./pages/Restaurants";
+import "./App.css";
+
+function ProtectedRoute({ children }) {
+  const user = localStorage.getItem("user");
+
+  return user ? children : <Navigate to="/" replace />;
+}
+
+function App() {
+  return (
+    <BrowserRouter>
+      <Routes>
+        <Route path="/" element={<GetStarted />} />
+        <Route path="/login" element={<Login />} />
+        <Route path="/register" element={<Register />} />
+
+        <Route
+          path="/home"
+          element={
+            <ProtectedRoute>
+              <Home />
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
+          path="/restaurants"
+          element={
+            <ProtectedRoute>
+              <Restaurants />
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
+          path="/restaurant/:id"
+          element={
+            <ProtectedRoute>
+              <RestaurantDetails />
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
+          path="/profile"
+          element={
+            <ProtectedRoute>
+              <Profile />
+            </ProtectedRoute>
+          }
+        />
+      </Routes>
+    </BrowserRouter>
+  );
+}
+
+export default App;
