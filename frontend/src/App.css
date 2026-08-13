@@ -2320,3 +2320,15 @@ a {
     padding: 8px 10px;
   }
 }
+.favorite-active {
+  color: #ef4b2f;
+}
+
+.favorite-button {
+  cursor: pointer;
+  transition: 0.2s ease;
+}
+
+.favorite-button:hover {
+  transform: scale(1.08);
+}
