@@ -10,6 +10,7 @@ import {
   Wheat,
 } from "lucide-react";
 import { registerUser } from "../services/api";
+import { saveSession } from "../services/session";
 
 const preferences = [
   "Vegetarian",
@@ -33,31 +34,68 @@ export default function Register() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
+  // =====================================================
+  // TOGGLE DIETARY PREFERENCE
+  // =====================================================
+
   const togglePreference = (item) => {
-    setSelected((current) =>
-      current.includes(item)
-        ? current.filter((x) => x !== item)
-        : [...current, item]
-    );
+    setSelected((current) => {
+      if (current.includes(item)) {
+        return current.filter((x) => x !== item);
+      }
+
+      return [...current, item];
+    });
   };
+
+  // =====================================================
+  // REGISTER
+  // =====================================================
 
   const handleRegister = async (e) => {
     e.preventDefault();
 
     setError("");
+
+    // Basic validation
+    if (!firstName.trim()) {
+      setError("Please enter your first name.");
+      return;
+    }
+
+    if (!lastName.trim()) {
+      setError("Please enter your last name.");
+      return;
+    }
+
+    if (!email.trim()) {
+      setError("Please enter your email address.");
+      return;
+    }
+
+    if (password.length < 8) {
+      setError("Password must contain at least 8 characters.");
+      return;
+    }
+
     setLoading(true);
 
     try {
-      await registerUser({
-        first_name: firstName,
-        last_name: lastName,
-        email,
+      const result = await registerUser({
+        first_name: firstName.trim(),
+        last_name: lastName.trim(),
+        email: email.trim(),
         password,
+        dietary_preferences: selected,
       });
 
-      navigate("/login");
+      // The API returns a session token, so the new user is signed in right away
+      saveSession(result);
+      navigate("/home");
     } catch (err) {
-      setError(err.message);
+      setError(
+        err.message || "Unable to create account. Please try again."
+      );
     } finally {
       setLoading(false);
     }
@@ -66,19 +104,35 @@ export default function Register() {
   return (
     <div className="auth-page">
 
+      {/* =================================================
+          LEFT SIDE
+      ================================================= */}
+
       <div className="auth-left">
+
+        {/* BACK TO HOME */}
 
         <Link to="/" className="back-link">
           <ArrowLeft size={17} />
           Back to home
         </Link>
 
+
+        {/* =================================================
+            REGISTER FORM
+        ================================================= */}
+
         <div className="register-form-container">
+
+          {/* LABEL */}
 
           <span className="auth-label">
             <Sparkles size={15} />
             PERSONALIZED FOOD DISCOVERY
           </span>
+
+
+          {/* TITLE */}
 
           <h1>
             Create your
@@ -86,67 +140,118 @@ export default function Register() {
             <span>account.</span>
           </h1>
 
+
+          {/* DESCRIPTION */}
+
           <p>
-            Tell us a little about yourself so DineSmart can personalize
-            your food discovery experience.
+            Tell us a little about yourself so DineSmart can
+            personalize your food discovery experience.
           </p>
 
-          <form onSubmit={handleRegister} className="auth-form">
+
+          {/* =================================================
+              FORM
+          ================================================= */}
+
+          <form
+            onSubmit={handleRegister}
+            className="auth-form"
+          >
+
+            {/* FIRST + LAST NAME */}
 
             <div className="form-row">
 
               <div>
-                <label>First name</label>
+                <label htmlFor="firstName">
+                  First name
+                </label>
 
                 <input
+                  id="firstName"
                   type="text"
                   placeholder="Jefrin"
                   value={firstName}
-                  onChange={(e) => setFirstName(e.target.value)}
+                  onChange={(e) =>
+                    setFirstName(e.target.value)
+                  }
                   required
                 />
               </div>
 
+
               <div>
-                <label>Last name</label>
+                <label htmlFor="lastName">
+                  Last name
+                </label>
 
                 <input
+                  id="lastName"
                   type="text"
                   placeholder="Raja"
                   value={lastName}
-                  onChange={(e) => setLastName(e.target.value)}
+                  onChange={(e) =>
+                    setLastName(e.target.value)
+                  }
                   required
                 />
               </div>
 
             </div>
 
-            <label>Email address</label>
+
+            {/* EMAIL */}
+
+            <label htmlFor="email">
+              Email address
+            </label>
 
             <input
+              id="email"
               type="email"
               placeholder="you@example.com"
               value={email}
-              onChange={(e) => setEmail(e.target.value)}
+              onChange={(e) =>
+                setEmail(e.target.value)
+              }
               required
             />
 
-            <label>Password</label>
+
+            {/* PASSWORD */}
+
+            <label htmlFor="password">
+              Password
+            </label>
 
             <div className="password-input">
 
               <input
-                type={showPassword ? "text" : "password"}
+                id="password"
+                type={
+                  showPassword
+                    ? "text"
+                    : "password"
+                }
                 placeholder="Create a strong password"
-                minLength="8"
+                minLength={8}
                 value={password}
-                onChange={(e) => setPassword(e.target.value)}
+                onChange={(e) =>
+                  setPassword(e.target.value)
+                }
                 required
               />
 
               <button
                 type="button"
-                onClick={() => setShowPassword(!showPassword)}
+                aria-label={
+                  showPassword
+                    ? "Hide password"
+                    : "Show password"
+                }
+                onClick={() =>
+                  setShowPassword(!showPassword)
+                }
               >
                 {showPassword ? (
                   <EyeOff size={18} />
@@ -157,22 +262,38 @@ export default function Register() {
 
             </div>
 
+
+            {/* =================================================
+                DIETARY PREFERENCES
+            ================================================= */}
+
             <div className="dietary-title">
 
               <div>
-                <label>Dietary preferences</label>
-                <small>Optional — you can change these later.</small>
+
+                <label>
+                  Dietary preferences
+                </label>
+
+                <small>
+                  Optional â€” you can change these later.
+                </small>
+
               </div>
 
               <Leaf size={18} />
 
             </div>
 
+
+            {/* PREFERENCE BUTTONS */}
+
             <div className="preference-select-grid">
 
               {preferences.map((item) => {
 
-                const active = selected.includes(item);
+                const active =
+                  selected.includes(item);
 
                 return (
                   <button
@@ -181,12 +302,22 @@ export default function Register() {
                     className={`preference-select ${
                       active ? "selected" : ""
                     }`}
-                    onClick={() => togglePreference(item)}
+                    onClick={() =>
+                      togglePreference(item)
+                    }
+                    aria-pressed={active}
                   >
-                    <span>{item}</span>
+
+                    <span>
+                      {item}
+                    </span>
 
                     <span className="preference-check">
-                      {active && <Check size={12} />}
+
+                      {active && (
+                        <Check size={12} />
+                      )}
+
                     </span>
 
                   </button>
@@ -195,16 +326,26 @@ export default function Register() {
 
             </div>
 
+
+            {/* =================================================
+                INFORMATION NOTE
+            ================================================= */}
+
             <div className="register-note">
 
               <Wheat size={16} />
 
               <span>
-                Your preferences help us provide more relevant restaurant
-                and dish recommendations.
+                Your preferences help us provide more
+                relevant restaurant and dish recommendations.
               </span>
 
             </div>
+
+
+            {/* =================================================
+                ERROR MESSAGE
+            ================================================= */}
 
             {error && (
               <div className="auth-error">
@@ -212,23 +353,48 @@ export default function Register() {
               </div>
             )}
 
+
+            {/* =================================================
+                SUBMIT BUTTON
+            ================================================= */}
+
             <button
               className="auth-submit"
               type="submit"
               disabled={loading}
             >
-              {loading ? "Creating account..." : "Create account"}
+
+              {loading
+                ? "Creating account..."
+                : "Create account"}
+
             </button>
 
           </form>
 
+
+          {/* =================================================
+              LOGIN LINK
+          ================================================= */}
+
           <p className="auth-switch">
+
             Already have an account?{" "}
-            <Link to="/login">Sign in</Link>
+
+            <Link to="/login">
+              Sign in
+            </Link>
+
           </p>
 
         </div>
+
       </div>
+
+
+      {/* =================================================
+          RIGHT SIDE IMAGE
+      ================================================= */}
 
       <div className="register-visual">
 
@@ -239,12 +405,18 @@ export default function Register() {
             alt="Healthy food"
           />
 
+
+          {/* IMAGE OVERLAY */}
+
           <div className="register-overlay">
 
-            <span>PERSONALIZED FOR YOU</span>
+            <span>
+              PERSONALIZED FOR YOU
+            </span>
 
             <h2>
-              Food discovery that understands your preferences.
+              Food discovery that understands
+              your preferences.
             </h2>
 
           </div>

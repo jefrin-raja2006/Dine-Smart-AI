@@ -124,3 +124,21 @@ The application uses MySQL as the relational database management system. The dat
 - Restaurant Recommendation System
 - Review Sentiment Analysis
 - Personalized Restaurant Suggestions
+---
+
+# Implemented schema (v2)
+
+The tables above describe the original design. The running system uses PostgreSQL tables
+`users`, `restaurants`, `menu_items`, `reviews`, `favorites`, `dietary_preferences`, `user_dietary_preferences`
+(created from `backend/app/models/models.py`). Changes made in v2 (all additive, applied automatically by `app/migrations.py`):
+
+| Table | Added |
+|---|---|
+| `users` | `created_at` |
+| `restaurants` | `latitude`, `longitude` (indexed), `amenity`, `phone`, `website`, `opening_hours`, `diet_tags` (JSON of OSM `diet:*` tags) |
+| `reviews` | `analysis_json` (dish/aspect mentions + trust reasons); `sentiment`, `sentiment_score`, `trust_score` are now populated by the NLP pipeline; **unique** (`user_id`, `restaurant_id`) |
+| `favorites` | **unique** (`user_id`, `restaurant_id`); indexes on both FKs |
+
+Conventions: `restaurants.rating` = average of review ratings (0.0 if none; the API returns `null` until reviewed) ·
+`sentiment_score` −1…+1 · `trust_score` 0…1 · `osm_id` = `node_<id>` / `way_<id>`.
+The original `Categories`, `RestaurantCategories` and `Recommendations` tables were not needed: cuisine is a text column and recommendations are computed on demand.

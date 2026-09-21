@@ -1,440 +1,191 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-import httpx
 
 from app.database.connection import get_db
-from app.models.models import Restaurant
-
-router = APIRouter(
-    prefix="/restaurants",
-    tags=["Restaurants"]
+from app.models.models import Favorite, Restaurant, User
+from app.security import get_current_user, get_optional_user
+from app.services import dietary
+from app.services.discovery import OverpassUnavailable, discover
+from app.services.geo import haversine_km
+from app.services.recommendation_service import profile_for_user, rank_restaurants
+from app.services.recommender import build_profile
+from app.services.serializers import (
+    menu_items_by_restaurant,
+    restaurant_card,
+    restaurant_cards,
+    review_stats,
 )
 
-OVERPASS_SERVERS = [
-    "https://overpass-api.de/api/interpreter",
-    "https://overpass.private.coffee/api/interpreter",
-]
+router = APIRouter(prefix="/restaurants", tags=["Restaurants"])
 
 
 # =========================================================
-# GET RESTAURANTS FROM DATABASE
+# LIST RESTAURANTS SAVED IN THE DATABASE
 # =========================================================
 
 @router.get("/")
 def get_restaurants(
-    db: Session = Depends(get_db)
+    q: str | None = Query(None, max_length=100),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
 ):
-    return db.query(Restaurant).all()
+    query = db.query(Restaurant)
+
+    if q:
+        pattern = f"%{q.strip()}%"
+        query = query.filter(
+            Restaurant.name.ilike(pattern) | Restaurant.cuisine.ilike(pattern)
+        )
+
+    rows = query.order_by(Restaurant.id).offset(offset).limit(limit).all()
+    return restaurant_cards(db, [(r, None) for r in rows])
 
 
 # =========================================================
-# GET NEARBY RESTAURANTS FROM OPENSTREETMAP
+# NEARBY RESTAURANTS (OpenStreetMap -> PostgreSQL sync)
 # =========================================================
 
 @router.get("/nearby")
 async def get_nearby_restaurants(
-    latitude: float = Query(...),
-    longitude: float = Query(...),
-    radius: int = Query(
-        5000,
-        ge=1000,
-        le=15000
-    )
+    latitude: float = Query(..., ge=-90, le=90),
+    longitude: float = Query(..., ge=-180, le=180),
+    radius: int = Query(5000, ge=1000, le=15000),
+    db: Session = Depends(get_db),
 ):
-
-    # -----------------------------------------------------
-    # First search radius
-    # -----------------------------------------------------
-
-    search_radii = [radius]
-
-    # Automatically expand if too few named places
-    if radius < 10000:
-        search_radii.append(10000)
-
-    last_error = None
-
-    for current_radius in search_radii:
-
-        query = f"""
-        [out:json][timeout:25];
-
-        (
-          node["amenity"~"restaurant|fast_food|cafe|food_court"]
-            ["name"]
-            (around:{current_radius},{latitude},{longitude});
-
-          way["amenity"~"restaurant|fast_food|cafe|food_court"]
-            ["name"]
-            (around:{current_radius},{latitude},{longitude});
-        );
-
-        out center tags;
-        """
-
-        headers = {
-            "User-Agent": "DineSmartAI/1.0",
-            "Accept": "application/json",
-            "Content-Type": "application/x-www-form-urlencoded",
-        }
-
-        for server in OVERPASS_SERVERS:
-
-            try:
-
-                async with httpx.AsyncClient(
-                    timeout=35,
-                    follow_redirects=True
-                ) as client:
-
-                    response = await client.post(
-                        server,
-                        data={"data": query},
-                        headers=headers
-                    )
-
-                    response.raise_for_status()
-
-                    data = response.json()
-
-                    restaurants = []
-                    seen = set()
-
-                    # -------------------------------------------------
-                    # Convert OSM results
-                    # -------------------------------------------------
-
-                    for element in data.get(
-                        "elements",
-                        []
-                    ):
-
-                        tags = element.get(
-                            "tags",
-                            {}
-                        )
-
-                        name = tags.get(
-                            "name"
-                        )
-
-                        # Ignore unnamed restaurants
-                        if not name:
-                            continue
-
-                        # ---------------------------------------------
-                        # Remove duplicates
-                        # ---------------------------------------------
-
-                        osm_id = element.get(
-                            "id"
-                        )
-
-                        if osm_id in seen:
-                            continue
-
-                        seen.add(osm_id)
-
-                        # ---------------------------------------------
-                        # Coordinates
-                        # ---------------------------------------------
-
-                        if element.get(
-                            "type"
-                        ) == "node":
-
-                            lat = element.get(
-                                "lat"
-                            )
-
-                            lon = element.get(
-                                "lon"
-                            )
-
-                        else:
-
-                            center = element.get(
-                                "center",
-                                {}
-                            )
-
-                            lat = center.get(
-                                "lat"
-                            )
-
-                            lon = center.get(
-                                "lon"
-                            )
-
-                        # ---------------------------------------------
-                        # Amenity
-                        # ---------------------------------------------
-
-                        amenity = tags.get(
-                            "amenity",
-                            "restaurant"
-                        )
-
-                        # ---------------------------------------------
-                        # Cuisine
-                        # ---------------------------------------------
-
-                        cuisine = tags.get(
-                            "cuisine"
-                        )
-
-                        if not cuisine:
-
-                            if amenity == "cafe":
-                                cuisine = "Cafe"
-
-                            elif amenity == "fast_food":
-                                cuisine = "Fast Food"
-
-                            elif amenity == "food_court":
-                                cuisine = "Food Court"
-
-                            else:
-                                cuisine = "Restaurant"
-
-                        # ---------------------------------------------
-                        # Address
-                        # ---------------------------------------------
-
-                        street = tags.get(
-                            "addr:street"
-                        )
-
-                        city = tags.get(
-                            "addr:city"
-                        )
-
-                        postcode = tags.get(
-                            "addr:postcode"
-                        )
-
-                        address_parts = []
-
-                        if street:
-                            address_parts.append(
-                                street
-                            )
-
-                        if city:
-                            address_parts.append(
-                                city
-                            )
-
-                        if postcode:
-                            address_parts.append(
-                                postcode
-                            )
-
-                        address = (
-                            ", ".join(
-                                address_parts
-                            )
-                            if address_parts
-                            else None
-                        )
-
-                        # ---------------------------------------------
-                        # Restaurant object
-                        # ---------------------------------------------
-
-                        restaurants.append({
-
-                            "osm_id":
-                                osm_id,
-
-                            "name":
-                                name,
-
-                            "cuisine":
-                                cuisine,
-
-                            "amenity":
-                                amenity,
-
-                            "latitude":
-                                lat,
-
-                            "longitude":
-                                lon,
-
-                            "address":
-                                address,
-
-                            "street":
-                                street,
-
-                            "city":
-                                city,
-
-                            "postcode":
-                                postcode,
-
-                            "phone":
-                                tags.get(
-                                    "phone"
-                                ),
-
-                            "website":
-                                tags.get(
-                                    "website"
-                                ),
-
-                            "opening_hours":
-                                tags.get(
-                                    "opening_hours"
-                                ),
-
-                            "diet":
-                                tags.get(
-                                    "diet"
-                                )
-                        })
-
-                    # -------------------------------------------------
-                    # If we have useful results, return them
-                    # -------------------------------------------------
-
-                    if restaurants:
-
-                        return {
-                            "status": "success",
-                            "source": "OpenStreetMap",
-                            "count": len(
-                                restaurants
-                            ),
-                            "search_location": {
-                                "latitude":
-                                    latitude,
-                                "longitude":
-                                    longitude,
-                                "radius":
-                                    current_radius
-                            },
-                            "restaurants":
-                                restaurants
-                        }
-
-                    # No restaurants at this radius.
-                    # Try the next radius.
-                    break
-
-            except httpx.HTTPStatusError as e:
-
-                last_error = (
-                    f"{server} returned "
-                    f"{e.response.status_code}"
-                )
-
-                print(
-                    "Overpass error:",
-                    last_error
-                )
-
-                continue
-
-            except httpx.RequestError as e:
-
-                last_error = (
-                    f"{server} connection error: "
-                    f"{str(e)}"
-                )
-
-                print(
-                    "Overpass connection error:",
-                    last_error
-                )
-
-                continue
-
-            except Exception as e:
-
-                last_error = str(e)
-
-                print(
-                    "Unexpected Overpass error:",
-                    last_error
-                )
-
-                continue
-
-    # =========================================================
-    # NOTHING FOUND
-    # =========================================================
+    try:
+        result = await discover(db, latitude, longitude, radius)
+    except OverpassUnavailable:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "The restaurant data service (OpenStreetMap) is temporarily "
+                "unavailable. Please try again in a moment."
+            ),
+        )
+
+    cards = restaurant_cards(db, result.restaurants)
 
     return {
         "status": "success",
-        "source": "OpenStreetMap",
-        "count": 0,
+        "source": "OpenStreetMap" if result.source == "openstreetmap" else "Saved data",
+        "database": "PostgreSQL",
+        "count": len(cards),
         "search_location": {
             "latitude": latitude,
             "longitude": longitude,
-            "radius": search_radii[-1]
+            "radius": result.radius_used,
         },
-        "restaurants": [],
-        "message": (
-            "No named food places were found "
-            "near this location."
-        )
+        "restaurants": cards,
+        "message": result.message,
     }
 
 
 # =========================================================
-# GET RESTAURANT BY DATABASE ID
+# ONE RESTAURANT (with menu, dietary evidence and - if logged in - AI match)
 # =========================================================
 
 @router.get("/{restaurant_id}")
 def get_restaurant(
     restaurant_id: int,
-    db: Session = Depends(get_db)
+    latitude: float | None = Query(None, ge=-90, le=90),
+    longitude: float | None = Query(None, ge=-180, le=180),
+    user: User | None = Depends(get_optional_user),
+    db: Session = Depends(get_db),
 ):
+    restaurant = db.get(Restaurant, restaurant_id)
+    if restaurant is None:
+        raise HTTPException(status_code=404, detail="Restaurant not found")
 
-    restaurant = (
-        db.query(Restaurant)
-        .filter(
-            Restaurant.id == restaurant_id
+    distance = None
+    if (
+        latitude is not None
+        and longitude is not None
+        and restaurant.latitude is not None
+        and restaurant.longitude is not None
+    ):
+        distance = haversine_km(
+            latitude, longitude, restaurant.latitude, restaurant.longitude
         )
-        .first()
+
+    stats = review_stats(db, [restaurant.id]).get(restaurant.id)
+    menus = menu_items_by_restaurant(db, [restaurant.id]).get(restaurant.id, [])
+
+    payload = restaurant_card(
+        restaurant, distance_km=distance, stats=stats, menu_items=menus
     )
 
-    if not restaurant:
+    evidence = dietary.evaluate_all(
+        name=restaurant.name,
+        cuisine=restaurant.cuisine,
+        diet_tags=dietary.parse_diet_tags(restaurant.diet_tags),
+        menu_items=menus,
+    )
+    payload["diet_evidence"] = [
+        {"name": e.preference, "level": e.level, "note": e.note}
+        for e in evidence.values()
+    ]
+    payload["menu_items"] = [
+        {
+            "id": m.id,
+            "name": m.name,
+            "description": m.description,
+            "price": m.price,
+            "is_vegetarian": bool(m.is_vegetarian),
+            "is_vegan": bool(m.is_vegan),
+            "is_jain": bool(m.is_jain),
+            "is_gluten_free": bool(m.is_gluten_free),
+        }
+        for m in menus
+    ]
 
-        raise HTTPException(
-            status_code=404,
-            detail="Restaurant not found"
+    # ---- personalised block (only for logged-in users) ---------------
+    if user is not None:
+        profile = profile_for_user(db, user)
+        favorite_ids = {
+            rid
+            for (rid,) in db.query(Favorite.restaurant_id).filter(
+                Favorite.user_id == user.id
+            )
+        }
+        ranked = rank_restaurants(db, [(restaurant, distance)], profile, favorite_ids)[0]
+        payload.update(
+            {
+                "ai_match": ranked["ai_match"],
+                "match_reasons": ranked["match_reasons"],
+                "confidence": ranked["confidence"],
+                "note": ranked["note"],
+                "recommended_dish": ranked["recommended_dish"],
+                "is_favorite": ranked["is_favorite"],
+            }
         )
 
-    return restaurant
+    return payload
 
 
 # =========================================================
-# CREATE RESTAURANT
+# CREATE RESTAURANT MANUALLY (login required)
 # =========================================================
 
-@router.post("/")
+@router.post("/", status_code=201)
 def create_restaurant(
-    name: str,
-    cuisine: str,
-    location: str,
-    rating: float = 0.0,
-    image_url: str = "",
-    db: Session = Depends(get_db)
+    name: str = Query(..., min_length=1, max_length=150),
+    cuisine: str = Query("", max_length=100),
+    location: str = Query("", max_length=150),
+    rating: float = Query(0.0, ge=0, le=5),
+    image_url: str = Query("", max_length=1000),
+    _: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
-
     restaurant = Restaurant(
-        name=name,
-        cuisine=cuisine,
-        location=location,
+        name=name.strip(),
+        cuisine=cuisine.strip(),
+        location=location.strip(),
         rating=rating,
-        image_url=image_url
+        image_url=image_url,
     )
-
     db.add(restaurant)
     db.commit()
     db.refresh(restaurant)
 
-    return restaurant
+    return restaurant_card(restaurant)

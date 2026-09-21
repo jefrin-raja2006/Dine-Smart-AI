@@ -1,91 +1,89 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
+from app.constants import normalize_preferences
 from app.database.connection import get_db
-from app.models.models import Restaurant, MenuItem
+from app.models.models import Favorite, Restaurant, User
+from app.security import get_current_user
+from app.services.discovery import (
+    OverpassUnavailable,
+    discover,
+    saved_restaurants_near,
+)
+from app.services.recommendation_service import profile_for_user, rank_restaurants
 
-router = APIRouter(
-    prefix="/recommendations",
-    tags=["AI Recommendations"]
+router = APIRouter(prefix="/recommendations", tags=["AI Recommendations"])
+
+ALLERGY_DISCLAIMER = (
+    "Dietary information comes from OpenStreetMap, menus and reviews and may be "
+    "incomplete. It is not medical advice and never a guarantee that food is "
+    "allergen-free - always confirm with the restaurant."
 )
 
 
-@router.get("/{user_id}")
-def get_recommendations(
-    user_id: int,
-    preferences: str = "",
-    db: Session = Depends(get_db)
+@router.get("/me")
+async def my_recommendations(
+    latitude: float | None = Query(None, ge=-90, le=90),
+    longitude: float | None = Query(None, ge=-180, le=180),
+    radius: int = Query(10000, ge=1000, le=15000),
+    limit: int = Query(20, ge=1, le=100),
+    preferences: str | None = Query(
+        None,
+        max_length=200,
+        description="Optional comma-separated override of saved dietary preferences",
+    ),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
-    restaurant_list = db.query(Restaurant).all()
+    """Personalised, explainable restaurant ranking for the logged-in user."""
+    override = None
+    if preferences is not None:
+        override, invalid = normalize_preferences(preferences.split(","))
+        if invalid:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown dietary preference: {', '.join(invalid)}",
+            )
 
-    if not restaurant_list:
-        return []
-
-    selected = {
-        item.strip().lower()
-        for item in preferences.split(",")
-        if item.strip()
-    }
-
-    recommendations = []
-
-    for restaurant in restaurant_list:
-
-        menu_items = db.query(MenuItem).filter(
-            MenuItem.restaurant_id == restaurant.id
-        ).all()
-
-        if not menu_items:
-            continue
-
-        best_match = 0
-        best_dish = None
-
-        for dish in menu_items:
-
-            score = 0
-            total_preferences = len(selected)
-
-            if "vegetarian" in selected and dish.is_vegetarian:
-                score += 25
-
-            if "vegan" in selected and dish.is_vegan:
-                score += 25
-
-            if "jain" in selected and dish.is_jain:
-                score += 25
-
-            if "gluten-free" in selected and dish.is_gluten_free:
-                score += 25
-
-            if total_preferences == 0:
-                score = 70
-
-            if score > best_match:
-                best_match = score
-                best_dish = dish.name
-
-        rating_score = min((restaurant.rating or 0) / 5 * 10, 10)
-
-        final_score = min(
-            round(best_match + rating_score),
-            100
+    if (latitude is None) != (longitude is None):
+        raise HTTPException(
+            status_code=400, detail="Provide both latitude and longitude"
         )
 
-        recommendations.append({
-            "restaurant_id": restaurant.id,
-            "restaurant_name": restaurant.name,
-            "cuisine": restaurant.cuisine,
-            "location": restaurant.location,
-            "rating": restaurant.rating,
-            "image_url": restaurant.image_url,
-            "ai_match": final_score,
-            "recommended_dish": best_dish,
-        })
+    message = None
 
-    recommendations.sort(
-        key=lambda x: x["ai_match"],
-        reverse=True
-    )
+    # ---- candidate restaurants --------------------------------------
+    if latitude is not None:
+        try:
+            result = await discover(db, latitude, longitude, radius)
+            pairs = result.restaurants
+            message = result.message
+        except OverpassUnavailable:
+            pairs = saved_restaurants_near(db, latitude, longitude, radius / 1000)
+            message = (
+                "Live restaurant data is unavailable; ranking saved restaurants."
+                if pairs
+                else "Restaurant data is temporarily unavailable."
+            )
+    else:
+        rows = db.query(Restaurant).order_by(Restaurant.id.desc()).limit(300).all()
+        pairs = [(r, None) for r in rows]
 
-    return recommendations
+    profile = profile_for_user(db, user, override)
+    favorite_ids = {
+        rid
+        for (rid,) in db.query(Favorite.restaurant_id).filter(
+            Favorite.user_id == user.id
+        )
+    }
+
+    ranked = rank_restaurants(db, pairs, profile, favorite_ids)[:limit]
+
+    return {
+        "count": len(ranked),
+        "preferences": profile.preferences,
+        "personalised": bool(profile.preferences or profile.has_history),
+        "message": message,
+        "disclaimer": ALLERGY_DISCLAIMER,
+        "recommendations": ranked,
+    }

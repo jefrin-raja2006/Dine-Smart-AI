@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { ArrowLeft, Eye, EyeOff, Sparkles } from "lucide-react";
 import { loginUser } from "../services/api";
+import { saveSession } from "../services/session";
 
 export default function Login() {
   const navigate = useNavigate();
@@ -23,9 +24,18 @@ export default function Login() {
         password,
       });
 
-      localStorage.setItem("user", JSON.stringify(result.user));
+      saveSession(result);
 
-      navigate("/home");
+      // Role-based navigation
+      const role = result?.user?.role || "customer";
+
+      if (role === "admin") {
+        navigate("/admin");
+      } else if (role === "owner") {
+        navigate("/owner");
+      } else {
+        navigate("/home");
+      }
     } catch (err) {
       setError(err.message);
     } finally {

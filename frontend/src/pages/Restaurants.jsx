@@ -1,474 +1,259 @@
-import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
-import {
-  Heart,
-  MapPin,
-  Search,
-  ShieldCheck,
-  Star,
-  Navigation,
-} from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
+import { MapPin, Navigation, Search, ShieldCheck, Sparkles } from "lucide-react";
 
-import { getNearbyRestaurants } from "../services/api";
+import Navbar from "../components/Navbar";
+import Footer from "../components/Footer";
+import RestaurantCard from "../components/RestaurantCard";
+import useFavorites from "../hooks/useFavorites";
+import useLocation from "../hooks/useLocation";
+import { getNearbyRestaurants, getRecommendations } from "../services/api";
+import { DIET_OPTIONS, matchesSearch, supportsDiet } from "../utils/format";
+
+const SEARCH_RADIUS = 15000;
 
 export default function Restaurants() {
-  const [restaurants, setRestaurants] = useState([]);
-  const [search, setSearch] = useState("");
+  const [params, setParams] = useSearchParams();
+
+  // "AI mode" ranks by personal match; normal mode lists the nearest places.
+  const preferencesParam = params.get("preferences") || "";
+  const mode = params.get("mode") === "ai" || preferencesParam ? "ai" : "nearby";
+
+  const [search, setSearch] = useState(params.get("search") || "");
   const [diet, setDiet] = useState("All");
 
+  const [restaurants, setRestaurants] = useState([]);
+  const [message, setMessage] = useState("");
+  const [disclaimer, setDisclaimer] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [reloadKey, setReloadKey] = useState(0);
 
-  const [location, setLocation] = useState(null);
+  const { location, loading: locating, error: locationError, locate } = useLocation();
+  const favorites = useFavorites();
+  const requestId = useRef(0);
 
-  const getUserLocation = () => {
+  // ---------------------------------------------------------
+  // Load restaurants for the current location + mode
+  // ---------------------------------------------------------
+  useEffect(() => {
+    if (!location) return;
+
+    const current = ++requestId.current;
+
+    const load =
+      mode === "ai"
+        ? getRecommendations({
+            latitude: location.latitude,
+            longitude: location.longitude,
+            radius: SEARCH_RADIUS,
+            limit: 60,
+            preferences: preferencesParam || undefined,
+          }).then((result) => ({
+            list: result.recommendations || [],
+            message: result.message || "",
+            disclaimer: result.disclaimer || "",
+          }))
+        : getNearbyRestaurants(location.latitude, location.longitude, SEARCH_RADIUS).then(
+            (result) => ({
+              list: result.restaurants || [],
+              message: result.message || "",
+              disclaimer: "",
+            })
+          );
+
     setLoading(true);
     setError("");
 
-    if (!navigator.geolocation) {
-      setError(
-        "Your browser does not support location."
-      );
-      setLoading(false);
-      return;
-    }
+    load
+      .then((result) => {
+        if (current !== requestId.current) return;
+        setRestaurants(result.list);
+        setMessage(result.message);
+        setDisclaimer(result.disclaimer);
+      })
+      .catch((err) => {
+        if (current !== requestId.current) return;
+        setError(err.message || "Unable to load restaurants.");
+      })
+      .finally(() => {
+        if (current === requestId.current) setLoading(false);
+      });
+  }, [location, mode, preferencesParam, reloadKey]);
 
-    navigator.geolocation.getCurrentPosition(
-      async (position) => {
-        const latitude =
-          position.coords.latitude;
-
-        const longitude =
-          position.coords.longitude;
-
-        console.log(
-          "User location:",
-          latitude,
-          longitude
-        );
-
-        setLocation({
-          latitude,
-          longitude,
-        });
-
-        try {
-          const result =
-            await getNearbyRestaurants(
-              latitude,
-              longitude,
-              15000
-            );
-
-          console.log(
-            "Restaurant API result:",
-            result
-          );
-
-          setRestaurants(
-            result.restaurants || []
-          );
-
-        } catch (err) {
-          console.error(err);
-
-          setError(
-            err.message ||
-              "Unable to load restaurants."
-          );
-
-        } finally {
-          setLoading(false);
-        }
-      },
-
-      (geoError) => {
-        console.error(
-          "Location error:",
-          geoError
-        );
-
-        setError(
-          "Unable to get your location. Please allow location access."
-        );
-
-        setLoading(false);
-      },
-
-      {
-        enableHighAccuracy: true,
-        timeout: 15000,
-        maximumAge: 300000,
-      }
-    );
+  const setMode = (next) => {
+    const updated = new URLSearchParams(params);
+    updated.delete("preferences");
+    if (next === "ai") updated.set("mode", "ai");
+    else updated.delete("mode");
+    setParams(updated);
   };
 
-  useEffect(() => {
-    getUserLocation();
-  }, []);
+  const filtered = useMemo(
+    () =>
+      restaurants.filter(
+        (restaurant) => matchesSearch(restaurant, search) && supportsDiet(restaurant, diet)
+      ),
+    [restaurants, search, diet]
+  );
 
-  const filtered =
-    restaurants.filter((restaurant) => {
-      const text =
-        `${restaurant.name || ""} ${
-          restaurant.cuisine || ""
-        } ${
-          restaurant.address || ""
-        } ${
-          restaurant.city || ""
-        }`.toLowerCase();
-
-      const matchesSearch =
-        text.includes(
-          search.toLowerCase()
-        );
-
-      // AI dietary filtering will be added next
-      const matchesDiet =
-        diet === "All";
-
-      return (
-        matchesSearch &&
-        matchesDiet
-      );
-    });
+  const busy = locating || loading;
+  const shownError = error || (!location && !locating ? locationError : "");
 
   return (
-    <div>
-
-      {/* NAVBAR */}
-
-      <header className="navbar">
-
-        <Link
-          className="logo"
-          to="/home"
-        >
-          <strong>D</strong>
-          <span>DineSmart AI</span>
-        </Link>
-
-        <div className="nav-actions">
-
-          <Link
-            className="login-btn"
-            to="/profile"
-          >
-            Profile
-          </Link>
-
-        </div>
-
-      </header>
-
-      {/* PAGE */}
+    <div className="app">
+      <Navbar />
 
       <main className="listing-page">
-
         <div className="listing-heading">
-
           <span className="eyebrow">
-            DISCOVER NEAR YOU
+            {mode === "ai" ? "AI PICKS FOR YOU" : "DISCOVER NEAR YOU"}
           </span>
 
-          <h1>
-            Find your next favorite place.
-          </h1>
+          <h1>{mode === "ai" ? "Restaurants that fit you." : "Find your next favorite place."}</h1>
 
           <p>
-            Real restaurants discovered
-            around your current location.
+            {mode === "ai"
+              ? "Ranked by your dietary preferences, saved places, reviews and distance."
+              : "Real restaurants discovered around your current location."}
           </p>
-
         </div>
 
-        {/* LOCATION BOX */}
-
+        {/* LOCATION */}
         <div className="location-status">
-
           <MapPin size={18} />
 
           <div>
-
-            <strong>
-              Your current location
-            </strong>
-
+            <strong>Your current location</strong>
             <span>
-
               {location
-                ? `${location.latitude.toFixed(
-                    4
-                  )}, ${location.longitude.toFixed(
-                    4
-                  )}`
-                : "Detecting..."}
-
+                ? `${location.latitude.toFixed(4)}, ${location.longitude.toFixed(4)}`
+                : locating
+                  ? "Detecting…"
+                  : "Not available"}
             </span>
-
           </div>
 
           <button
-            onClick={getUserLocation}
-            disabled={loading}
+            onClick={() => {
+              locate();
+              setReloadKey((k) => k + 1);
+            }}
+            disabled={busy}
           >
-
             <Navigation size={15} />
-
-            {loading
-              ? "Finding..."
-              : "Refresh location"}
-
+            {busy ? "Finding…" : "Refresh location"}
           </button>
-
         </div>
 
-        {/* SEARCH */}
+        {/* MODE + SEARCH + DIET FILTER */}
+        <div className="mode-switch" role="tablist" aria-label="Sort restaurants">
+          <button
+            role="tab"
+            aria-selected={mode === "nearby"}
+            className={mode === "nearby" ? "active" : ""}
+            onClick={() => setMode("nearby")}
+          >
+            <MapPin size={15} />
+            Nearest
+          </button>
+          <button
+            role="tab"
+            aria-selected={mode === "ai"}
+            className={mode === "ai" ? "active" : ""}
+            onClick={() => setMode("ai")}
+          >
+            <Sparkles size={15} />
+            AI picks
+          </button>
+        </div>
 
         <div className="listing-controls">
-
           <div className="listing-search">
-
             <Search size={19} />
-
             <input
-              placeholder="Search restaurants..."
+              placeholder="Search restaurants, cuisines, areas..."
               value={search}
-              onChange={(e) =>
-                setSearch(e.target.value)
-              }
+              onChange={(e) => setSearch(e.target.value)}
+              aria-label="Search restaurants"
             />
-
           </div>
 
-          {[
-            "All",
-            "Vegetarian",
-            "Vegan",
-            "Jain",
-            "Gluten-Free",
-          ].map((item) => (
-
+          {["All", ...DIET_OPTIONS].map((item) => (
             <button
               key={item}
-              className={
-                diet === item
-                  ? "filter active"
-                  : "filter"
-              }
-              onClick={() =>
-                setDiet(item)
-              }
+              className={diet === item ? "filter active" : "filter"}
+              onClick={() => setDiet(item)}
+              aria-pressed={diet === item}
             >
               {item}
             </button>
-
           ))}
-
         </div>
 
-        {/* LOADING */}
+        {diet !== "All" && (
+          <p className="filter-hint">
+            Showing places with verified or likely <b>{diet}</b> options. "Likely" is
+            inferred (e.g. from cuisine) - please confirm with the restaurant.
+          </p>
+        )}
 
-        {loading && (
+        {message && <div className="info-banner">{message}</div>}
+        {favorites.error && <div className="inline-error">{favorites.error}</div>}
 
+        {busy && (
           <div className="loading">
-
             <MapPin size={20} />
-
-            Finding restaurants near you...
-
+            Finding restaurants near you…
           </div>
-
         )}
 
-        {/* ERROR */}
-
-        {!loading && error && (
-
+        {!busy && shownError && (
           <div className="error">
-            {error}
+            {shownError}
+            <button className="link-button" onClick={location ? () => setReloadKey((k) => k + 1) : locate}>
+              Try again
+            </button>
           </div>
-
         )}
 
-        {/* RESTAURANTS */}
+        {!busy && !shownError && location && (
+          <>
+            <div className="nearby-count">
+              <strong>{filtered.length}</strong> {filtered.length === 1 ? "restaurant" : "restaurants"} found
+            </div>
 
-        {!loading &&
-          !error && (
+            <div className="restaurant-grid">
+              {filtered.map((restaurant) => (
+                <RestaurantCard
+                  key={restaurant.id}
+                  restaurant={restaurant}
+                  isFavorite={favorites.isFavorite(restaurant.id)}
+                  favoriteBusy={favorites.isBusy(restaurant.id)}
+                  onToggleFavorite={favorites.toggle}
+                />
+              ))}
+            </div>
 
-            <>
-
-              <div className="nearby-count">
-
-                <strong>
-                  {filtered.length}
-                </strong>
-
-                {" "}real restaurants found
-
+            {filtered.length === 0 && (
+              <div className="no-results">
+                <Search size={30} />
+                <h3>No restaurants found</h3>
+                <p>Try a different search or dietary filter.</p>
               </div>
+            )}
 
-              <div className="restaurant-grid">
-
-                {filtered.map(
-                  (restaurant) => (
-
-                    <article
-                      className="restaurant-card"
-                      key={
-                        restaurant.osm_id
-                      }
-                    >
-
-                      {/* IMAGE */}
-
-                      <div className="restaurant-image">
-
-                        <img
-                          src="https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?auto=format&fit=crop&w=900&q=80"
-                          alt={
-                            restaurant.name
-                          }
-                        />
-
-                        <button
-                          className="favorite-button"
-                          onClick={() =>
-                            alert(
-                              "Favorites will be connected next."
-                            )
-                          }
-                        >
-
-                          <Heart size={18} />
-
-                        </button>
-
-                      </div>
-
-                      {/* DETAILS */}
-
-                      <div className="restaurant-body">
-
-                        <div className="restaurant-title-row">
-
-                          <h3>
-                            {
-                              restaurant.name
-                            }
-                          </h3>
-
-                          <span className="rating">
-
-                            <Star
-                              size={14}
-                            />
-
-                            N/A
-
-                          </span>
-
-                        </div>
-
-                        <p className="cuisine">
-
-                          {
-                            restaurant.cuisine ||
-                            "Restaurant"
-                          }
-
-                        </p>
-
-                        <div className="tags">
-
-                          <span>
-                            {
-                              restaurant.amenity ||
-                              "Restaurant"
-                            }
-                          </span>
-
-                          <span>
-                            OpenStreetMap
-                          </span>
-
-                        </div>
-
-                        <div className="location-row">
-
-                          <MapPin
-                            size={14}
-                          />
-
-                          {restaurant.address ||
-                            restaurant.city ||
-                            restaurant.street ||
-                            "Nearby"}
-
-                        </div>
-
-                        {restaurant.phone && (
-
-                          <div className="location-row">
-
-                            📞
-
-                            {restaurant.phone}
-
-                          </div>
-
-                        )}
-
-                        <div className="trust-row">
-
-                          <ShieldCheck
-                            size={16}
-                          />
-
-                          Real location data
-
-                        </div>
-
-                        {restaurant.website && (
-
-                          <a
-                            className="details-link"
-                            href={
-                              restaurant.website
-                            }
-                            target="_blank"
-                            rel="noreferrer"
-                          >
-                            Visit website →
-                          </a>
-
-                        )}
-
-                      </div>
-
-                    </article>
-
-                  )
-                )}
-
+            {disclaimer && (
+              <div className="disclaimer">
+                <ShieldCheck size={18} />
+                <p>{disclaimer}</p>
               </div>
-
-              {filtered.length === 0 && (
-
-                <div className="no-results">
-
-                  No restaurants found.
-
-                </div>
-
-              )}
-
-            </>
-
-          )}
-
+            )}
+          </>
+        )}
       </main>
 
+      <Footer />
     </div>
   );
 }

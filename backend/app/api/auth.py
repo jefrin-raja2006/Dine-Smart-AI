@@ -1,108 +1,141 @@
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, Depends, HTTPException, Request
+from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
-from pydantic import BaseModel, EmailStr
-import bcrypt
+from sqlalchemy.orm import Session
 
+from app.constants import DIETARY_PREFERENCES, normalize_preferences
 from app.database.connection import get_db
-from app.models.models import User
+from app.models.models import DietaryPreference, User
+from app.schemas.auth import LoginRequest, RegisterRequest
+from app.security import (
+    burn_password_check,
+    create_access_token,
+    hash_password,
+    login_limiter,
+    password_problem,
+    register_limiter,
+    verify_password,
+)
+from app.services.serializers import user_payload
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
 
-class RegisterRequest(BaseModel):
-    first_name: str
-    last_name: str
-    email: EmailStr
-    password: str
+def _client_ip(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
 
 
-class LoginRequest(BaseModel):
-    email: EmailStr
-    password: str
+def resolve_preferences(db: Session, names: list[str]) -> list[DietaryPreference]:
+    """Validate names and return the matching DietaryPreference rows."""
+    valid, invalid = normalize_preferences(names)
 
-
-@router.post("/register")
-def register(data: RegisterRequest, db: Session = Depends(get_db)):
-
-    existing_user = db.query(User).filter(
-        User.email == data.email
-    ).first()
-
-    if existing_user:
+    if invalid:
         raise HTTPException(
             status_code=400,
-            detail="Email already registered"
+            detail=(
+                f"Unknown dietary preference: {', '.join(invalid)}. "
+                f"Allowed: {', '.join(DIETARY_PREFERENCES)}"
+            ),
         )
 
-    if len(data.password) < 8:
+    rows = []
+    for name in valid:
+        row = (
+            db.query(DietaryPreference)
+            .filter(func.lower(DietaryPreference.name) == name.lower())
+            .first()
+        )
+        if row is None:
+            row = DietaryPreference(name=name)
+            db.add(row)
+            db.flush()
+        rows.append(row)
+
+    return rows
+
+
+def _auth_response(message: str, user: User) -> dict:
+    return {
+        "message": message,
+        "access_token": create_access_token(user.id),
+        "token_type": "bearer",
+        "user": user_payload(user),
+    }
+
+
+@router.post("/register", status_code=201)
+def register(
+    data: RegisterRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    ip_key = f"register:{_client_ip(request)}"
+    wait = register_limiter.retry_after(ip_key)
+    if wait:
         raise HTTPException(
-            status_code=400,
-            detail="Password must contain at least 8 characters"
+            status_code=429,
+            detail="Too many sign-up attempts. Please try again later.",
+            headers={"Retry-After": str(wait)},
         )
+    register_limiter.hit(ip_key)
 
-    hashed_password = bcrypt.hashpw(
-        data.password.encode("utf-8"),
-        bcrypt.gensalt()
-    ).decode("utf-8")
+    problem = password_problem(data.password)
+    if problem:
+        raise HTTPException(status_code=400, detail=problem)
+
+    email = data.email.strip().lower()
+
+    if db.query(User).filter(func.lower(User.email) == email).first():
+        raise HTTPException(status_code=400, detail="Email already registered")
+
+    preferences = resolve_preferences(db, data.dietary_preferences)
 
     user = User(
         name=f"{data.first_name} {data.last_name}",
-        email=data.email,
-        password=hashed_password
+        email=email,
+        password=hash_password(data.password),
     )
+    user.dietary_preferences = preferences
 
     try:
         db.add(user)
         db.commit()
         db.refresh(user)
-
     except IntegrityError:
         db.rollback()
-        raise HTTPException(
-            status_code=400,
-            detail="Email already registered"
-        )
+        raise HTTPException(status_code=400, detail="Email already registered")
 
-    return {
-        "message": "Account created successfully",
-        "user": {
-            "id": user.id,
-            "name": user.name,
-            "email": user.email
-        }
-    }
+    return _auth_response("Account created successfully", user)
 
 
 @router.post("/login")
-def login(data: LoginRequest, db: Session = Depends(get_db)):
+def login(
+    data: LoginRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    email = data.email.strip().lower()
+    key = f"login:{_client_ip(request)}:{email}"
 
-    user = db.query(User).filter(
-        User.email == data.email
-    ).first()
-
-    if not user:
+    wait = login_limiter.retry_after(key)
+    if wait:
         raise HTTPException(
-            status_code=401,
-            detail="Invalid email or password"
+            status_code=429,
+            detail="Too many failed attempts. Please try again later.",
+            headers={"Retry-After": str(wait)},
         )
 
-    password_match = bcrypt.checkpw(
-        data.password.encode("utf-8"),
-        user.password.encode("utf-8")
-    )
+    user = db.query(User).filter(func.lower(User.email) == email).first()
 
-    if not password_match:
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid email or password"
-        )
+    if user is None:
+        burn_password_check(data.password)
+        valid = False
+    else:
+        valid = verify_password(data.password, user.password)
 
-    return {
-        "message": "Login successful",
-        "user": {
-            "id": user.id,
-            "name": user.name,
-            "email": user.email
-        }
-    }
+    if not valid:
+        login_limiter.hit(key)
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+
+    login_limiter.clear(key)
+    return _auth_response("Login successful", user)
