@@ -14,7 +14,7 @@ import Register from "./pages/Register";
 import RestaurantDetails from "./pages/RestaurantDetails";
 import Profile from "./pages/Profile";
 import Restaurants from "./pages/Restaurants";
-import Owner from "./pages/Owner";
+import Owner from "./pages/owner";
 
 import {
   isLoggedIn,
