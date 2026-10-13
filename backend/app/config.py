@@ -17,6 +17,7 @@ _DEV_SECRET_KEY = "dev-only-insecure-secret-key-change-me-0123456789abcdef"
 _DEFAULT_OVERPASS_SERVERS = [
     "https://overpass-api.de/api/interpreter",
     "https://overpass.private.coffee/api/interpreter",
+    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
 ]
 
 
